@@ -7,7 +7,8 @@ app.use(cors({ origin: true }));
 app.use(express.json());
 
 // PEGA AQUÍ TU ACCESS TOKEN DE PRODUCCIÓN (APP_USR-...)
-const client = new MercadoPagoConfig({ accessToken: 'APP_USR-2842018947277573-100121-90bbe447e7a39369b6c2dee6ee4a3f97-3732663698' });
+// El código ahora leerá una variable secreta en lugar del texto expuesto
+const client = new MercadoPagoConfig({ accessToken: process.env.MERCADO_PAGO_TOKEN });
 
 app.post("/create_preference", async (req, res) => {
     try {
