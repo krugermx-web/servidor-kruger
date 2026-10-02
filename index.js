@@ -32,15 +32,40 @@ app.post("/create_preference", async (req, res) => {
 });
 
 // RUTA 2 (NUEVA): Procesar el cobro de la tarjeta directamente
+// RUTA PARA PROCESAR EL PAGO DIRECTO
 app.post("/process_payment", async (req, res) => {
     try {
         const payment = new Payment(client);
-        // Mercado Pago nos manda los datos encriptados de la tarjeta y aquí los procesamos
-        const result = await payment.create({ body: req.body });
-        res.json({ status: result.status, status_detail: result.status_detail, id: result.id });
+        
+        // Recibimos los datos del Brick y aseguramos la estructura que exige Mercado Pago
+        const body = {
+            transaction_amount: Number(req.body.transaction_amount),
+            token: req.body.token,
+            description: req.body.description || "Compra en Tienda Krüger",
+            installments: Number(req.body.installments || 1),
+            payment_method_id: req.body.payment_method_id,
+            issuer_id: req.body.issuer_id ? Number(req.body.issuer_id) : undefined,
+            payer: {
+                email: req.body.payer?.email || "test_user_123@test.com",
+                identification: {
+                    type: req.body.payer?.identification?.type || "CPF",
+                    number: req.body.payer?.identification?.number || "123456789"
+                }
+            }
+        };
+
+        const result = await payment.create({ body });
+        res.json({ 
+            status: result.status, 
+            status_detail: result.status_detail, 
+            id: result.id 
+        });
     } catch (error) {
-        console.error("Error al procesar pago:", error);
-        res.status(500).json({ error: "No se pudo procesar el pago" });
+        console.error("Error detallado al procesar pago:", error);
+        // Devolvemos el mensaje exacto del banco para que sepas qué falló
+        res.status(400).json({ 
+            error: error.message || "Error al procesar el pago con el banco" 
+        });
     }
 });
 
