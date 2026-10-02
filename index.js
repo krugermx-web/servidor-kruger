@@ -46,10 +46,11 @@ app.post("/process_payment", async (req, res) => {
             payment_method_id: req.body.payment_method_id,
             issuer_id: req.body.issuer_id ? Number(req.body.issuer_id) : undefined,
             payer: {
-                email: req.body.payer?.email || "test_user_123@test.com",
+                email: req.body.payer?.email || "cliente@kruger.com",
                 identification: {
-                    type: req.body.payer?.identification?.type || "CPF",
-                    number: req.body.payer?.identification?.number || "123456789"
+                    // Forzamos un tipo y número genérico válido para evitar el rechazo
+                    type: "RFC",
+                    number: "XAXX010101000" // RFC genérico estándar en México para público en general
                 }
             }
         };
