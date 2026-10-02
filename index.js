@@ -3,6 +3,17 @@ const cors = require("cors");
 // IMPORTANTE: Ahora importamos "Payment" además de Preference
 const { MercadoPagoConfig, Preference, Payment } = require("mercadopago");
 
+const nodemailer = require("nodemailer");
+
+// Configurar el "cartero" de Gmail de forma segura
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+        user: 'krugerdistribudorautorizado', // Tu correo sí puede ir aquí, no hay problema
+        pass: process.env.EMAIL_PASS // <--- ¡La contraseña real ya no está en el código!
+    }
+});
+
 const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
