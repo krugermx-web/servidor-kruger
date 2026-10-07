@@ -1,16 +1,14 @@
 const express = require("express");
 const cors = require("cors");
-// IMPORTANTE: Ahora importamos "Payment" además de Preference
-const { MercadoPagoConfig, Preference, Payment } = require("mercadopago");
-
 const nodemailer = require("nodemailer");
+const fetch = require("node-fetch"); // <-- IMPORTANTE: Necesitamos fetch para llamar a Clip
 
 // Configurar el "cartero" de Gmail de forma segura
 const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
-        user: 'krugerdistribudorautorizado@gmail.com', // <-- Le agregué @gmail.com para evitar errores de conexión
-        pass: process.env.EMAIL_PASS // <--- ¡La contraseña real ya no está en el código!
+        user: 'krugerdistribudorautorizado@gmail.com',
+        pass: process.env.EMAIL_PASS
     }
 });
 
@@ -18,62 +16,79 @@ const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
 
-// Tu token seguro en Render
-const client = new MercadoPagoConfig({ accessToken: process.env.MERCADO_PAGO_TOKEN });
+// Jalamos tu llave secreta de Clip (que dejaste en la variable de Mercado Libre)
+const CLIP_SECRET_KEY = process.env['Mercado Libre Pago Token'];
 
-// RUTA 1: Crear la orden (Preferencias)
-app.post("/create_preference", async (req, res) => {
+// =================================================================
+// RUTA 1: CREAR EL LINK DE PAGO CLIP (La que llama tu index.html)
+// =================================================================
+app.post("/crear-pago-clip", async (req, res) => {
     try {
-        const preference = new Preference(client);
-        const body = {
-            items: req.body.items.map(item => ({
-                title: item.name + (item.wantsInstall ? " (+ Instalación)" : ""),
-                quantity: Number(item.quantity),
-                unit_price: Number(item.price + (item.wantsInstall ? item.installPrice : 0)),
-                currency_id: "MXN",
-            })),
-            // Eliminamos las back_urls y el auto_return para evitar que tu página se esté recargando como loca
-        };
-        const result = await preference.create({ body });
-        res.json({ id: result.id });
+        const { items, total, ordenKruger } = req.body;
+
+        // Petición oficial a la API de Clip Checkout
+        const response = await fetch('https://api-v2.clip.mx/checkout', {
+            method: 'POST',
+            headers: {
+                'accept': 'application/vnd.clip.v2+json',
+                'content-type': 'application/json',
+                'x-api-key': CLIP_SECRET_KEY
+            },
+            body: JSON.stringify({
+                amount: total,
+                currency: 'MXN',
+                purchase_description: 'Compra en Krüger',
+                redirection_url: {
+                    // Cambia esto a la URL de tu página de agradecimiento
+                    default: "https://krugermx-web.github.io/KrugerDistribuidora/exito.html" 
+                },
+                // Podemos mandar el correo del cliente a Clip para que le mande su recibo oficial
+                payer_email: ordenKruger?.payer?.email || "cliente@kruger.com",
+                // Guardamos los datos de la orden en los metadatos para recuperarlos en el webhook
+                metadata: {
+                    orden_json: JSON.stringify(ordenKruger || {})
+                }
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.payment_request_url) {
+            res.json({ checkoutUrl: data.payment_request_url });
+        } else {
+            console.error("Error de Clip al generar link:", data);
+            res.status(400).json({ error: "No se pudo generar el pago con Clip" });
+        }
+
     } catch (error) {
-        console.error("Error al crear preferencia:", error);
+        console.error("Error interno del servidor:", error);
         res.status(500).json({ error: "Error interno" });
     }
 });
 
-// RUTA 2: Procesar el cobro de la tarjeta directamente
-app.post("/process_payment", async (req, res) => {
-    try {
-        const payment = new Payment(client);
-        
-        // Recibimos los datos del Brick y aseguramos la estructura que exige Mercado Pago
-        const body = {
-            transaction_amount: Number(req.body.transaction_amount),
-            token: req.body.token,
-            description: req.body.description || "Compra en Tienda Krüger",
-            installments: Number(req.body.installments || 1),
-            payment_method_id: req.body.payment_method_id,
-            issuer_id: req.body.issuer_id ? Number(req.body.issuer_id) : undefined,
-            payer: {
-                email: req.body.payer?.email || "cliente@kruger.com",
-                identification: {
-                    // Forzamos un tipo y número genérico válido para evitar el rechazo
-                    type: "RFC",
-                    number: "XAXX010101000" // RFC genérico estándar en México para público en general
-                }
+// =================================================================
+// RUTA 2: EL WEBHOOK (Notificaciones de Clip y Envío de Correo)
+// =================================================================
+app.post('/webhook-clip', (req, res) => {
+    const notificacion = req.body;
+    console.log("¡Aviso de Clip recibido!", notificacion);
+
+    // Siempre debemos responderle a Clip con un 200 OK inmediatamente
+    res.status(200).send('OK');
+
+    // Procesamos el pago solo si fue APROBADO en segundo plano
+    if (notificacion.status === 'APPROVED') {
+        try {
+            const totalPagado = notificacion.amount;
+            const correoCliente = notificacion.payer_email || "cliente@kruger.com";
+            
+            // Recuperamos los datos de la orden que guardamos en los metadatos
+            let orden = {};
+            if (notificacion.metadata && notificacion.metadata.orden_json) {
+                orden = JSON.parse(notificacion.metadata.orden_json);
             }
-        };
 
-        const result = await payment.create({ body });
-
-        // =========================================================================
-        // NUEVO: SI EL PAGO ES APROBADO, ENVIAMOS EL CORREO CON EL DESGLOSE COMPLETO
-        // =========================================================================
-        if (result.status === "approved") {
-            const correoCliente = req.body.payer?.email || "cliente@kruger.com";
-            const totalPagado = req.body.transaction_amount;
-            const orden = req.body.ordenKruger || {}; // Recibimos todo el carrito desde el front-end
+            console.log(`Pago aprobado procesado. Enviando correo a ${correoCliente}...`);
 
             // 1. Armamos la lista de productos
             let productosHTML = "";
@@ -89,7 +104,7 @@ app.post("/process_payment", async (req, res) => {
                     `;
                 });
             } else {
-                productosHTML = `<p style="color: #666;">Calentador Krüger - Pago Seguro</p>`;
+                productosHTML = `<p style="color: #666;">Calentador Krüger - Pago Seguro con Clip</p>`;
             }
 
             // 2. Armamos la caja con detalles de envío
@@ -111,9 +126,9 @@ app.post("/process_payment", async (req, res) => {
             const mailOptions = {
                 from: '"Tienda Krüger" <krugerdistribudorautorizado@gmail.com>',
                 to: correoCliente,
-                subject: 'Detalles de tu orden Krüger - ¡Pago Aprobado!',
+                subject: 'Detalles de tu orden Krüger - ¡Pago Aprobado con Clip!',
                 html: `
-                    <div style="font-family: Arial, sans-serif; padding: 30px; max-width: 600px; margin: auto; border: 1px solid #e5e7eb; border-top: 6px solid #002855; border-radius: 12px; background-color: #ffffff;">
+                    <div style="font-family: Arial, sans-serif; padding: 30px; max-width: 600px; margin: auto; border: 1px solid #e5e7eb; border-top: 6px solid #ff5a00; border-radius: 12px; background-color: #ffffff;">
                         
                         <div style="text-align: center; margin-bottom: 25px;">
                             <h2 style="color: #002855; margin-bottom: 5px;">¡Gracias por tu compra, ${orden.customerName ? orden.customerName.split(' ')[0] : ''}!</h2>
@@ -133,29 +148,19 @@ app.post("/process_payment", async (req, res) => {
                 `
             };
 
-            // 4. Disparamos el correo en segundo plano
+            // 4. Disparamos el correo
             transporter.sendMail(mailOptions, (error, info) => {
-                if (error) console.error("Error enviando correo:", error);
+                if (error) console.error("Error enviando correo de confirmación:", error);
                 else console.log("Correo enviado con éxito al cliente:", correoCliente);
             });
-        }
-        // =========================================================================
 
-        // Respondemos a tu página de GitHub Pages
-        res.json({ 
-            status: result.status, 
-            status_detail: result.status_detail, 
-            id: result.id 
-        });
-    } catch (error) {
-        console.error("Error detallado al procesar pago:", error);
-        res.status(400).json({ 
-            error: error.message || "Error al procesar el pago con el banco" 
-        });
+        } catch (err) {
+             console.error("Error procesando la notificación de Clip:", err);
+        }
     }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log("Servidor seguro activo en el puerto " + PORT);
+    console.log("Servidor Clip-Krüger activo en el puerto " + PORT);
 });
