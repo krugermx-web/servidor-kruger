@@ -3,7 +3,7 @@ const cors = require("cors");
 const fetch = require("node-fetch");
 const { Resend } = require("resend");
 const { initializeApp } = require("firebase/app");
-const { getFirestore, collection, addDoc } = require("firebase/firestore");
+const { getFirestore, collection, doc, updateDoc, getDoc } = require("firebase/firestore");
 
 const firebaseConfig = {
     apiKey: "AIzaSyCSdcopQjbZoYwcgwjB8uhosN-yY11kMdQ",
@@ -27,7 +27,7 @@ app.use(express.json());
 // =================================================================
 app.post("/crear-pago-clip", async (req, res) => {
     try {
-        const { items, total, ordenKruger } = req.body;
+        const { total, ordenKruger } = req.body;
         const apiKey = process.env.CLIP_API_KEY;
         const secretKey = process.env.CLIP_SECRET_KEY;
         const tokenBase64 = Buffer.from(`${apiKey}:${secretKey}`).toString('base64');
@@ -50,7 +50,7 @@ app.post("/crear-pago-clip", async (req, res) => {
                 },
                 payer_email: ordenKruger?.customerEmail || "krugerdistribudorautorizado@gmail.com",
                 metadata: {
-                    orden_json: JSON.stringify(ordenKruger || {})
+                    orderId: ordenKruger?.orderId || ""
                 }
             })
         });
@@ -69,7 +69,7 @@ app.post("/crear-pago-clip", async (req, res) => {
 });
 
 // =================================================================
-// RUTA 2: EL WEBHOOK (Notificaciones de Clip, Firebase y Correo)
+// RUTA 2: EL WEBHOOK (Actualiza Firebase y Envía Correo)
 // =================================================================
 app.post('/webhook-clip', async (req, res) => {
     const notificacion = req.body;
@@ -88,17 +88,7 @@ app.post('/webhook-clip', async (req, res) => {
         const receipt = notificacion.receipt_no || paymentObj.receipt_no || "Sin folio";
         
         let meta = notificacion.metadata || paymentObj.metadata || {};
-        
-        let orden = {};
-        if (meta.orden_json) {
-            try {
-                orden = JSON.parse(meta.orden_json);
-            } catch (e) {
-                console.error("Error al parsear orden_json:", e);
-            }
-        }
-
-        const emailCliente = orden.customerEmail || notificacion.payer_email || paymentObj.payer_email || "";
+        const orderId = meta.orderId || "";
 
         // Filtro estricto para ignorar pagos rechazados o cancelados
         const esRechazado = status.includes('DECLIN') || status.includes('REJECT') || status.includes('FAIL') || status.includes('CANC') ||
@@ -106,86 +96,88 @@ app.post('/webhook-clip', async (req, res) => {
                             pStatus.includes('DECLIN') || pStatus.includes('REJECT') || pStatus.includes('FAIL') || pStatus.includes('CANC');
 
         if (esRechazado) {
-            console.log("⚠️ El pago fue rechazado o cancelado. No se registra en Firebase.");
+            console.log("⚠️ El pago fue rechazado o cancelado.");
+            if (orderId) {
+                await updateDoc(doc(db, "orders", orderId), { status: "Rechazado" });
+            }
             return;
         }
 
         const esAprobado = status.includes('APPROV') || status.includes('PAID') || statusDesc.includes('COMPLET') ||
                            pStatus.includes('APPROV') || pStatus.includes('PAID') || pStatusDesc.includes('COMPLET');
 
-        if (esAprobado) {
-            // 1. GUARDAR EN FIREBASE CON COMPATIBILIDAD PARA EL ADMIN
-            try {
-                orden.status = "Pagado";
-                orden.createdAt = { seconds: Math.floor(Date.now() / 1000) };
-                orden.transaccionId = receipt;
+        if (esAprobado && orderId) {
+            // 1. ACTUALIZAR LA ORDEN EXISTENTE EN FIREBASE A "Pagado"
+            const orderRef = doc(db, "orders", orderId);
+            const orderSnap = await getDoc(orderRef);
+
+            if (orderSnap.exists()) {
+                const ordenData = orderSnap.data();
                 
-                await addDoc(collection(db, "orders"), orden);
-                console.log("✅ ORDEN GUARDADA EXITOSAMENTE Y COMPATIBLE CON EL ADMIN");
-            } catch (fbError) {
-                console.error("❌ Error al guardar en Firebase:", fbError);
-            }
-
-            // 2. ENVIAR CORREO AL CLIENTE
-            let productosHTML = "";
-            if (orden.items && orden.items.length > 0) {
-                orden.items.forEach(item => {
-                    let extraInstalacion = item.wantsInstall ? `<br><small style="color: #D31145;">+ Incluye Instalación Certificada ($${item.installPrice})</small>` : '';
-                    productosHTML += `
-                        <div style="padding: 12px 0; border-bottom: 1px solid #eee;">
-                            <strong style="color: #333;">${item.quantity}x ${item.name}</strong> 
-                            <span style="float: right; color: #333; font-weight: bold;">$${item.price * item.quantity} MXN</span>
-                            ${extraInstalacion}
-                        </div>
-                    `;
+                await updateDoc(orderRef, {
+                    status: "Pagado",
+                    transaccionId: receipt
                 });
-            } else {
-                productosHTML = `<p style="color: #666;">Calentador Krüger - Pago Seguro con Clip</p>`;
-            }
+                console.log("✅ ORDEN ACTUALIZADA A PAGADO EN FIREBASE CON TODOS SUS DATOS");
 
-            const detallesEnvio = `
-                <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; border: 1px solid #eee; margin-top: 25px;">
-                    <h4 style="margin-top: 0; color: #002855; border-bottom: 1px solid #ddd; padding-bottom: 8px;">Detalles de Entrega</h4>
-                    <p style="margin: 5px 0; font-size: 14px;"><strong>Cliente:</strong> ${orden.customerName || 'No especificado'}</p>
-                    <p style="margin: 5px 0; font-size: 14px;"><strong>Teléfono:</strong> ${orden.customerPhone || 'No especificado'}</p>
-                    <p style="margin: 5px 0; font-size: 14px;"><strong>Dirección de Envío:</strong> ${orden.shippingAddress || 'No especificada'}</p>
-                    ${orden.needsInstall ? `
-                        <h4 style="margin-top: 15px; color: #002855; border-bottom: 1px solid #ddd; padding-bottom: 8px;">Cita de Instalación</h4>
-                        <p style="margin: 5px 0; font-size: 14px;"><strong>Dirección a instalar:</strong> ${orden.installAddress || orden.shippingAddress}</p>
-                        <p style="margin: 5px 0; font-size: 14px;"><strong>Horario solicitado:</strong> ${orden.installSchedule || 'A coordinar'}</p>
-                    ` : ''}
-                </div>
-            `;
-
-            if (emailCliente) {
-                try {
-                    await resend.emails.send({
-                        from: 'Tienda Krüger <onboarding@resend.dev>',
-                        to: [emailCliente],
-                        subject: 'Detalles de tu orden Krüger - ¡Pago Aprobado!',
-                        html: `
-                            <div style="font-family: Arial, sans-serif; padding: 30px; max-width: 600px; margin: auto; border: 1px solid #e5e7eb; border-top: 6px solid #ff5a00; border-radius: 12px; background-color: #ffffff;">
-                                <div style="text-align: center; margin-bottom: 25px;">
-                                    <h2 style="color: #002855; margin-bottom: 5px;">¡Gracias por tu compra, ${orden.customerName ? orden.customerName.split(' ')[0] : 'Cliente'}!</h2>
-                                    <p style="color: #22c55e; font-weight: bold; font-size: 16px; margin-top: 0; padding: 8px; background-color: #dcfce7; border-radius: 6px; display: inline-block;">Tu pago por $${amount} MXN fue aprobado.</p>
-                                </div>
-                                <h3 style="color: #002855; margin-bottom: 10px;">Resumen de tu pedido</h3>
-                                ${productosHTML}
-                                ${detallesEnvio}
-                                <p style="margin-top: 25px; font-size: 15px; color: #4b5563; line-height: 1.5;">Tu orden ya está confirmada. Nos pondremos en contacto contigo a la brevedad para coordinar la entrega en tu domicilio.</p>
-                                <hr style="border: 0; border-top: 1px solid #e5e7eb; margin: 30px 0 20px;">
-                                <p style="font-size: 11px; color: #9ca3af; text-align: center; text-transform: uppercase; letter-spacing: 1px;">Krüger - Distribuidor Autorizado<br>Este es un comprobante automático, por favor no respondas a este correo.</p>
+                // 2. ENVIAR CORREO CON TODOS LOS DATOS DEL CLIENTE Y PRODUCTOS
+                let productosHTML = "";
+                if (ordenData.items && ordenData.items.length > 0) {
+                    ordenData.items.forEach(item => {
+                        let extraInstalacion = item.wantsInstall ? `<br><small style="color: #D31145;">+ Incluye Instalación Certificada ($${item.installPrice})</small>` : '';
+                        productosHTML += `
+                            <div style="padding: 12px 0; border-bottom: 1px solid #eee;">
+                                <strong style="color: #333;">${item.quantity}x ${item.name}</strong> 
+                                <span style="float: right; color: #333; font-weight: bold;">$${item.price * item.quantity} MXN</span>
+                                ${extraInstalacion}
                             </div>
-                        `
+                        `;
                     });
-                    console.log("✅ Correo enviado con éxito al cliente:", emailCliente);
-                } catch (emailError) {
-                    console.error("❌ Error enviando correo vía Resend:", emailError);
+                } else {
+                    productosHTML = `<p style="color: #666;">Calentador Krüger - Pago Seguro con Clip</p>`;
+                }
+
+                const detallesEnvio = `
+                    <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; border: 1px solid #eee; margin-top: 25px;">
+                        <h4 style="margin-top: 0; color: #002855; border-bottom: 1px solid #ddd; padding-bottom: 8px;">Detalles de Entrega</h4>
+                        <p style="margin: 5px 0; font-size: 14px;"><strong>Cliente:</strong> ${ordenData.customerName || 'No especificado'}</p>
+                        <p style="margin: 5px 0; font-size: 14px;"><strong>Teléfono:</strong> ${ordenData.customerPhone || 'No especificado'}</p>
+                        <p style="margin: 5px 0; font-size: 14px;"><strong>Dirección de Envío:</strong> ${ordenData.shippingAddress || 'No especificada'}</p>
+                        ${ordenData.needsInstall ? `
+                            <h4 style="margin-top: 15px; color: #002855; border-bottom: 1px solid #ddd; padding-bottom: 8px;">Cita de Instalación</h4>
+                            <p style="margin: 5px 0; font-size: 14px;"><strong>Dirección a instalar:</strong> ${ordenData.installAddress || ordenData.shippingAddress}</p>
+                            <p style="margin: 5px 0; font-size: 14px;"><strong>Horario solicitado:</strong> ${ordenData.installSchedule || 'A coordinar'}</p>
+                        ` : ''}
+                    </div>
+                `;
+
+                if (ordenData.customerEmail) {
+                    try {
+                        await resend.emails.send({
+                            from: 'Tienda Krüger <onboarding@resend.dev>',
+                            to: [ordenData.customerEmail],
+                            subject: 'Detalles de tu orden Krüger - ¡Pago Aprobado!',
+                            html: `
+                                <div style="font-family: Arial, sans-serif; padding: 30px; max-width: 600px; margin: auto; border: 1px solid #e5e7eb; border-top: 6px solid #ff5a00; border-radius: 12px; background-color: #ffffff;">
+                                    <div style="text-align: center; margin-bottom: 25px;">
+                                        <h2 style="color: #002855; margin-bottom: 5px;">¡Gracias por tu compra, ${ordenData.customerName ? ordenData.customerName.split(' ')[0] : 'Cliente'}!</h2>
+                                        <p style="color: #22c55e; font-weight: bold; font-size: 16px; margin-top: 0; padding: 8px; background-color: #dcfce7; border-radius: 6px; display: inline-block;">Tu pago por $${amount} MXN fue aprobado.</p>
+                                    </div>
+                                    <h3 style="color: #002855; margin-bottom: 10px;">Resumen de tu pedido</h3>
+                                    ${productosHTML}
+                                    ${detallesEnvio}
+                                    <p style="margin-top: 25px; font-size: 15px; color: #4b5563; line-height: 1.5;">Tu orden ya está confirmada. Nos pondremos en contacto contigo a la brevedad para coordinar la entrega en tu domicilio.</p>
+                                    <hr style="border: 0; border-top: 1px solid #e5e7eb; margin: 30px 0 20px;">
+                                    <p style="font-size: 11px; color: #9ca3af; text-align: center; text-transform: uppercase; letter-spacing: 1px;">Krüger - Distribuidor Autorizado<br>Este es un comprobante automático, por favor no respondas a este correo.</p>
+                                </div>
+                            `
+                        });
+                        console.log("✅ Correo enviado con éxito al cliente:", ordenData.customerEmail);
+                    } catch (emailError) {
+                        console.error("❌ Error enviando correo vía Resend:", emailError);
+                    }
                 }
             }
-
-        } else {
-            console.log("ℹ️ El aviso de Clip no corresponde a una venta aprobada.");
         }
     } catch (err) {
          console.error("❌ Error procesando el webhook:", err);
