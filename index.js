@@ -89,7 +89,6 @@ app.post('/webhook-clip', async (req, res) => {
         
         let meta = notificacion.metadata || paymentObj.metadata || {};
         
-        // RECUPERAMOS LOS DATOS DE LA ORDEN DEL CLIENTE DESDE LOS METADATOS
         let orden = {};
         if (meta.orden_json) {
             try {
@@ -99,10 +98,9 @@ app.post('/webhook-clip', async (req, res) => {
             }
         }
 
-        // CAPTURAMOS EL CORREO REAL DEL CLIENTE (Priorizando el formulario, luego Clip)
         const emailCliente = orden.customerEmail || notificacion.payer_email || paymentObj.payer_email || "";
 
-        // Filtro estricto de pagos rechazados/cancelados
+        // Filtro estricto para ignorar pagos rechazados o cancelados
         const esRechazado = status.includes('DECLIN') || status.includes('REJECT') || status.includes('FAIL') || status.includes('CANC') ||
                             statusDesc.includes('DECLIN') || statusDesc.includes('REJECT') || statusDesc.includes('FAIL') || statusDesc.includes('CANC') ||
                             pStatus.includes('DECLIN') || pStatus.includes('REJECT') || pStatus.includes('FAIL') || pStatus.includes('CANC');
@@ -116,19 +114,19 @@ app.post('/webhook-clip', async (req, res) => {
                            pStatus.includes('APPROV') || pStatus.includes('PAID') || pStatusDesc.includes('COMPLET');
 
         if (esAprobado) {
-            // 1. GUARDAR EN FIREBASE CON LOS DATOS REALES DEL CLIENTE
+            // 1. GUARDAR EN FIREBASE CON COMPATIBILIDAD PARA EL ADMIN
             try {
-                orden.status = "Pagado y Confirmado (Clip)";
-                orden.fechaPago = new Date().toISOString();
+                orden.status = "Pagado";
+                orden.createdAt = { seconds: Math.floor(Date.now() / 1000) };
                 orden.transaccionId = receipt;
                 
                 await addDoc(collection(db, "orders"), orden);
-                console.log("✅ ORDEN DEL CLIENTE GUARDADA EN FIREBASE:", orden.customerName);
+                console.log("✅ ORDEN GUARDADA EXITOSAMENTE Y COMPATIBLE CON EL ADMIN");
             } catch (fbError) {
                 console.error("❌ Error al guardar en Firebase:", fbError);
             }
 
-            // 2. ENVIAR CORREO AL CORREO REAL DEL CLIENTE
+            // 2. ENVIAR CORREO AL CLIENTE
             let productosHTML = "";
             if (orden.items && orden.items.length > 0) {
                 orden.items.forEach(item => {
@@ -180,12 +178,10 @@ app.post('/webhook-clip', async (req, res) => {
                             </div>
                         `
                     });
-                    console.log("✅ Correo enviado exitosamente al correo del cliente:", emailCliente);
+                    console.log("✅ Correo enviado con éxito al cliente:", emailCliente);
                 } catch (emailError) {
                     console.error("❌ Error enviando correo vía Resend:", emailError);
                 }
-            } else {
-                console.log("⚠️ No se encontró un correo válido para enviar la confirmación.");
             }
 
         } else {
