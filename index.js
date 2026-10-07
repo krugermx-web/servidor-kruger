@@ -7,6 +7,7 @@ const fetch = require("node-fetch");
 const { initializeApp } = require("firebase/app");
 const { getFirestore, collection, addDoc } = require("firebase/firestore");
 
+
 // Configuración de tu Firebase
 const firebaseConfig = {
     apiKey: "AIzaSyCSdcopQjbZoYwcgwjB8uhosN-yY11kMdQ",
