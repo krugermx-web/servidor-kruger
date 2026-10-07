@@ -2,13 +2,9 @@ const express = require("express");
 const cors = require("cors");
 const nodemailer = require("nodemailer");
 const fetch = require("node-fetch");
-
-// NUEVO: Importar Firebase para Node.js
 const { initializeApp } = require("firebase/app");
 const { getFirestore, collection, addDoc } = require("firebase/firestore");
 
-
-// Configuración de tu Firebase
 const firebaseConfig = {
     apiKey: "AIzaSyCSdcopQjbZoYwcgwjB8uhosN-yY11kMdQ",
     authDomain: "tienda-kruger.firebaseapp.com",
@@ -20,7 +16,6 @@ const firebaseConfig = {
 const appFirebase = initializeApp(firebaseConfig);
 const db = getFirestore(appFirebase);
 
-// Configurar el "cartero" de Gmail
 const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
@@ -85,29 +80,33 @@ app.post("/crear-pago-clip", async (req, res) => {
 app.post('/webhook-clip', async (req, res) => {
     const notificacion = req.body;
     console.log("¡Aviso de Clip recibido!");
+    
+    // RADIOGRAFÍA: Imprimimos todo lo que manda Clip para saber exactamente su estructura
+    console.log("DATOS DEL WEBHOOK:", JSON.stringify(notificacion, null, 2));
 
-    // Siempre debemos responderle a Clip con un 200 OK inmediatamente
+    // Siempre responder 200 OK a Clip para que no bloquee los avisos
     res.status(200).send('OK');
 
-    // Procesamos el pago solo si fue APROBADO en segundo plano
-    if (notificacion.status === 'APPROVED') {
-        try {
-            const totalPagado = notificacion.amount;
-            const correoCliente = notificacion.payer_email || "cliente@kruger.com";
-            
-            // Recuperamos los datos de la orden
+    try {
+        // Buscamos el estado en los diferentes formatos que suele usar Clip
+        const status = notificacion.status || (notificacion.payment && notificacion.payment.status) || "";
+        const amount = notificacion.amount || (notificacion.payment && notificacion.payment.amount) || 0;
+        const email = notificacion.payer_email || (notificacion.payment && notificacion.payment.payer_email) || "cliente@kruger.com";
+        const receipt = notificacion.receipt_no || (notificacion.payment && notificacion.payment.receipt_no) || "Sin folio";
+        
+        let meta = notificacion.metadata || (notificacion.payment && notificacion.payment.metadata) || {};
+
+        if (status === 'APPROVED' || status === 'PAYMENT.APPROVED') {
             let orden = {};
-            if (notificacion.metadata && notificacion.metadata.orden_json) {
-                orden = JSON.parse(notificacion.metadata.orden_json);
+            if (meta.orden_json) {
+                orden = JSON.parse(meta.orden_json);
             }
 
-            // =========================================================
-            // 1. GUARDAR LA ORDEN EN FIREBASE DESDE EL SERVIDOR
-            // =========================================================
+            // 1. GUARDAR EN FIREBASE
             try {
                 orden.status = "Pagado y Confirmado (Clip)";
                 orden.fechaPago = new Date().toISOString();
-                orden.transaccionId = notificacion.receipt_no || "Sin folio";
+                orden.transaccionId = receipt;
                 
                 await addDoc(collection(db, "orders"), orden);
                 console.log("✅ ORDEN GUARDADA EXITOSAMENTE EN FIREBASE DESDE EL SERVIDOR");
@@ -115,9 +114,7 @@ app.post('/webhook-clip', async (req, res) => {
                 console.error("❌ Error al guardar en Firebase:", fbError);
             }
 
-            // =========================================================
-            // 2. ENVIAR CORREO DE CONFIRMACIÓN
-            // =========================================================
+            // 2. ENVIAR CORREO
             let productosHTML = "";
             if (orden.items && orden.items.length > 0) {
                 orden.items.forEach(item => {
@@ -150,13 +147,13 @@ app.post('/webhook-clip', async (req, res) => {
 
             const mailOptions = {
                 from: '"Tienda Krüger" <krugerdistribudorautorizado@gmail.com>',
-                to: correoCliente,
+                to: email,
                 subject: 'Detalles de tu orden Krüger - ¡Pago Aprobado!',
                 html: `
                     <div style="font-family: Arial, sans-serif; padding: 30px; max-width: 600px; margin: auto; border: 1px solid #e5e7eb; border-top: 6px solid #ff5a00; border-radius: 12px; background-color: #ffffff;">
                         <div style="text-align: center; margin-bottom: 25px;">
                             <h2 style="color: #002855; margin-bottom: 5px;">¡Gracias por tu compra, ${orden.customerName ? orden.customerName.split(' ')[0] : ''}!</h2>
-                            <p style="color: #22c55e; font-weight: bold; font-size: 16px; margin-top: 0; padding: 8px; background-color: #dcfce7; border-radius: 6px; display: inline-block;">Tu pago por $${totalPagado} MXN fue aprobado.</p>
+                            <p style="color: #22c55e; font-weight: bold; font-size: 16px; margin-top: 0; padding: 8px; background-color: #dcfce7; border-radius: 6px; display: inline-block;">Tu pago por $${amount} MXN fue aprobado.</p>
                         </div>
                         <h3 style="color: #002855; margin-bottom: 10px;">Resumen de tu pedido</h3>
                         ${productosHTML}
@@ -170,12 +167,14 @@ app.post('/webhook-clip', async (req, res) => {
 
             transporter.sendMail(mailOptions, (error, info) => {
                 if (error) console.error("❌ Error enviando correo:", error);
-                else console.log("✅ Correo enviado con éxito al cliente:", correoCliente);
+                else console.log("✅ Correo enviado con éxito al cliente:", email);
             });
 
-        } catch (err) {
-             console.error("Error procesando la notificación de Clip:", err);
+        } else {
+            console.log("El estado del pago no es APPROVED o no se reconoció el formato. Estado detectado:", status);
         }
+    } catch (err) {
+         console.error("❌ Error procesando la notificación de Clip:", err);
     }
 });
 
