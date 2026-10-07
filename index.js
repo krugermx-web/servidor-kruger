@@ -3,7 +3,8 @@ const cors = require("cors");
 const fetch = require("node-fetch");
 const { Resend } = require("resend");
 const { initializeApp } = require("firebase/app");
-const { getFirestore, collection, doc, updateDoc, getDoc } = require("firebase/firestore");
+// IMPORTAMOS getDocs, query y where PARA BUSCAR LA ORDEN
+const { getFirestore, collection, doc, updateDoc, getDoc, getDocs, query, where } = require("firebase/firestore");
 
 const firebaseConfig = {
     apiKey: "AIzaSyCSdcopQjbZoYwcgwjB8uhosN-yY11kMdQ",
@@ -75,45 +76,64 @@ app.post('/webhook-clip', async (req, res) => {
     const notificacion = req.body;
     console.log("¡Aviso de Clip recibido!");
     
-    // MODO ESPÍA: Imprimimos exactamente qué nos mandó Clip
-    console.log("DATOS CRUDOS DE CLIP:", JSON.stringify(notificacion, null, 2));
-    
     res.status(200).send('OK');
 
     try {
         const status = (notificacion.status || "").toUpperCase();
-        const statusDesc = (notificacion.status_description || "").toUpperCase();
-        const paymentObj = notificacion.payment || {};
+        const eventType = (notificacion.event_type || "").toUpperCase();
+        
+        const paymentObj = notificacion.payment || notificacion.payment_detail || {};
         const pStatus = (paymentObj.status || "").toUpperCase();
         const pStatusDesc = (paymentObj.status_description || "").toUpperCase();
 
         const amount = notificacion.amount || paymentObj.amount || 0;
         const receipt = notificacion.receipt_no || paymentObj.receipt_no || "Sin folio";
         
-        let meta = notificacion.metadata || paymentObj.metadata || {};
-        const orderId = meta.orderId || "";
+        // 1. Buscamos el ID en los metadatos (por si Clip decide enviarlo bien)
+        let meta = notificacion.metadata || paymentObj.metadata || (notificacion.payment_request_detail && notificacion.payment_request_detail.metadata) || {};
+        let orderId = meta.orderId || "";
 
-        console.log(`🔎 ANÁLISIS - Estatus: ${status} | pStatus: ${pStatus} | OrderID: ${orderId}`);
+        // 2. Rescatamos el correo desde donde sea que Clip lo haya escondido
+        const clipEmail = notificacion.user_id || notificacion.payer_email || (notificacion.payment_request_detail && notificacion.payment_request_detail.assigned_user) || "";
 
-        // Filtro estricto para ignorar pagos rechazados o cancelados
+        console.log(`🔎 Status: ${status} | Event: ${eventType} | OrderID: ${orderId} | Correo: ${clipEmail}`);
+
         const esRechazado = status.includes('DECLIN') || status.includes('REJECT') || status.includes('FAIL') || status.includes('CANC') ||
-                            statusDesc.includes('DECLIN') || statusDesc.includes('REJECT') || statusDesc.includes('FAIL') || statusDesc.includes('CANC') ||
-                            pStatus.includes('DECLIN') || pStatus.includes('REJECT') || pStatus.includes('FAIL') || pStatus.includes('CANC');
+                            pStatus.includes('DECLIN') || pStatus.includes('REJECT') || pStatus.includes('FAIL');
 
         if (esRechazado) {
-            console.log("⚠️ El pago fue rechazado o cancelado.");
-            if (orderId) {
-                await updateDoc(doc(db, "orders", orderId), { status: "Rechazado" });
-            }
+            console.log("⚠️ El pago fue rechazado.");
             return;
         }
 
-        const esAprobado = status.includes('APPROV') || status.includes('PAID') || statusDesc.includes('COMPLET') ||
-                           pStatus.includes('APPROV') || pStatus.includes('PAID') || pStatusDesc.includes('COMPLET');
+        // Clip nos envía "REQUEST_COMPLETED" o "PAID" cuando fue exitoso
+        const esAprobado = status.includes('APPROV') || status.includes('PAID') || eventType.includes('COMPLETED') || pStatus.includes('COMPLET') || pStatus.includes('PAID');
 
         if (esAprobado) {
+            
+            // ¡MAGIA!: Si Clip borró el orderId, buscamos la orden usando el correo del cliente.
+            if (!orderId && clipEmail) {
+                console.log(`Buscando la orden en Firebase para el correo: ${clipEmail}`);
+                const q = query(
+                    collection(db, "orders"), 
+                    where("customerEmail", "==", clipEmail),
+                    where("status", "==", "Pendiente de Pago")
+                );
+                
+                const querySnapshot = await getDocs(q);
+                if (!querySnapshot.empty) {
+                    // Si el cliente intentó pagar varias veces, tomamos el intento más reciente
+                    let docsList = [];
+                    querySnapshot.forEach(d => docsList.push({ id: d.id, ...d.data() }));
+                    docsList.sort((a, b) => b.createdAt.seconds - a.createdAt.seconds);
+                    
+                    orderId = docsList[0].id; // Asignamos el ID rescatado
+                    console.log("✅ ¡Orden rescatada inteligentemente! ID:", orderId);
+                }
+            }
+
             if (orderId) {
-                // 1. ACTUALIZAR LA ORDEN EXISTENTE EN FIREBASE A "Pagado"
+                // AHORA SÍ: ACTUALIZAR LA ORDEN EXISTENTE EN FIREBASE A "Pagado"
                 const orderRef = doc(db, "orders", orderId);
                 const orderSnap = await getDoc(orderRef);
 
@@ -124,9 +144,9 @@ app.post('/webhook-clip', async (req, res) => {
                         status: "Pagado",
                         transaccionId: receipt
                     });
-                    console.log("✅ ORDEN ACTUALIZADA A PAGADO EN FIREBASE");
+                    console.log("✅ ORDEN ACTUALIZADA A PAGADO EN EL ADMIN");
 
-                    // 2. ENVIAR CORREO
+                    // ENVIAR CORREO
                     let productosHTML = "";
                     if (ordenData.items && ordenData.items.length > 0) {
                         ordenData.items.forEach(item => {
@@ -181,14 +201,10 @@ app.post('/webhook-clip', async (req, res) => {
                             console.error("❌ Error enviando correo vía Resend:", emailError);
                         }
                     }
-                } else {
-                    console.log("⚠️ Se recibió ID pero no existe en Firebase:", orderId);
                 }
             } else {
-                console.log("⚠️ El pago se aprobó, pero CLIP no devolvió el orderId en los metadatos.");
+                console.log("⚠️ Pago aprobado pero no se pudo asociar a ninguna orden pendiente.");
             }
-        } else {
-            console.log("⚠️ El aviso no cumple con los criterios de aprobación.");
         }
     } catch (err) {
          console.error("❌ Error procesando el webhook:", err);
