@@ -1,9 +1,9 @@
 const express = require("express");
 const cors = require("cors");
 const nodemailer = require("nodemailer");
-const fetch = require("node-fetch"); // <-- IMPORTANTE: Necesitamos fetch para llamar a Clip
+const fetch = require("node-fetch"); 
 
-// Configurar el "cartero" de Gmail de forma segura
+// Configurar el "cartero" de Gmail
 const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
@@ -16,35 +16,36 @@ const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json());
 
-// Jalamos tu llave secreta de Clip (que dejaste en la variable de Mercado Libre)
-const CLIP_SECRET_KEY = process.env['MERCADO_PAGO_TOKEN'];
-
 // =================================================================
-// RUTA 1: CREAR EL LINK DE PAGO CLIP (La que llama tu index.html)
+// RUTA 1: CREAR EL LINK DE PAGO CLIP
 // =================================================================
 app.post("/crear-pago-clip", async (req, res) => {
     try {
         const { items, total, ordenKruger } = req.body;
 
-        // Petición oficial a la API de Clip Checkout
+        // 1. El servidor lee tus llaves desde Render
+        const apiKey = process.env.CLIP_API_KEY;
+        const secretKey = process.env.CLIP_SECRET_KEY;
+        
+        // 2. El servidor las fusiona y encripta automáticamente en formato Base64
+        const tokenBase64 = Buffer.from(`${apiKey}:${secretKey}`).toString('base64');
+
+        // 3. Petición oficial a la API de Clip Checkout con el pase maestro
         const response = await fetch('https://api.payclip.com/v2/checkout', {
             method: 'POST',
             headers: {
                 'accept': 'application/vnd.clip.v2+json',
                 'content-type': 'application/json',
-                'x-api-key': CLIP_SECRET_KEY
+                'Authorization': `Basic ${tokenBase64}` // <-- Gafete maestro generado
             },
             body: JSON.stringify({
                 amount: total,
                 currency: 'MXN',
                 purchase_description: 'Compra en Krüger',
                 redirection_url: {
-                    // Cambia esto a la URL de tu página de agradecimiento
                     default: "https://krugermx-web.github.io/KrugerDistribuidora/success.html" 
                 },
-                // Podemos mandar el correo del cliente a Clip para que le mande su recibo oficial
-                payer_email: ordenKruger?.payer?.email || "cliente@kruger.com",
-                // Guardamos los datos de la orden en los metadatos para recuperarlos en el webhook
+                payer_email: ordenKruger?.customerEmail || "cliente@kruger.com",
                 metadata: {
                     orden_json: JSON.stringify(ordenKruger || {})
                 }
