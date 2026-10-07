@@ -1,7 +1,7 @@
 const express = require("express");
 const cors = require("cors");
-const nodemailer = require("nodemailer");
 const fetch = require("node-fetch");
+const { Resend } = require("resend"); // NUEVO: API de correos moderna
 const { initializeApp } = require("firebase/app");
 const { getFirestore, collection, addDoc } = require("firebase/firestore");
 
@@ -16,13 +16,9 @@ const firebaseConfig = {
 const appFirebase = initializeApp(firebaseConfig);
 const db = getFirestore(appFirebase);
 
-const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-        user: 'krugerdistribudorautorizado@gmail.com',
-        pass: process.env.EMAIL_PASS
-    }
-});
+// Inicializamos Resend con tu variable de entorno en Render
+// (Debes crear la variable RESEND_API_KEY en tu panel de Render)
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 const app = express();
 app.use(cors({ origin: true }));
@@ -81,10 +77,6 @@ app.post('/webhook-clip', async (req, res) => {
     const notificacion = req.body;
     console.log("¡Aviso de Clip recibido!");
     
-    // Radiografía para control interno
-    console.log("DATOS DEL WEBHOOK:", JSON.stringify(notificacion, null, 2));
-
-    // Siempre responder 200 OK a Clip de inmediato
     res.status(200).send('OK');
 
     try {
@@ -99,17 +91,17 @@ app.post('/webhook-clip', async (req, res) => {
         const receipt = notificacion.receipt_no || paymentObj.receipt_no || "Sin folio";
         let meta = notificacion.metadata || paymentObj.metadata || {};
 
-        // 1. Detectamos explícitamente si el pago fue rechazado o cancelado para ignorarlo
+        // Filtro estricto: Si viene rechazado, cancelado o declinado, lo ignoramos por completo
         const esRechazado = status.includes('DECLIN') || status.includes('REJECT') || status.includes('FAIL') || status.includes('CANC') ||
                             statusDesc.includes('DECLIN') || statusDesc.includes('REJECT') || statusDesc.includes('FAIL') || statusDesc.includes('CANC') ||
                             pStatus.includes('DECLIN') || pStatus.includes('REJECT') || pStatus.includes('FAIL') || pStatus.includes('CANC');
 
         if (esRechazado) {
-            console.log("⚠️ El pago fue rechazado, cancelado o falló por parte del banco. No se registrará en Firebase.");
-            return; // Detenemos el proceso aquí mismo
+            console.log("⚠️ El pago fue rechazado o cancelado. No se registra en Firebase.");
+            return;
         }
 
-        // 2. Verificamos que realmente sea un pago exitoso
+        // Verificamos si el pago fue exitoso
         const esAprobado = status.includes('APPROV') || status.includes('PAID') || statusDesc.includes('COMPLET') ||
                            pStatus.includes('APPROV') || pStatus.includes('PAID') || pStatusDesc.includes('COMPLET');
 
@@ -119,7 +111,7 @@ app.post('/webhook-clip', async (req, res) => {
                 orden = JSON.parse(meta.orden_json);
             }
 
-            // GUARDAR EN FIREBASE SOLO SI ESTÁ APROBADO
+            // 1. GUARDAR EN FIREBASE
             try {
                 orden.status = "Pagado y Confirmado (Clip)";
                 orden.fechaPago = new Date().toISOString();
@@ -131,7 +123,7 @@ app.post('/webhook-clip', async (req, res) => {
                 console.error("❌ Error al guardar en Firebase:", fbError);
             }
 
-            // ENVIAR CORREO DE CONFIRMACIÓN
+            // 2. ENVIAR CORREO VÍA API (Resend)
             let productosHTML = "";
             if (orden.items && orden.items.length > 0) {
                 orden.items.forEach(item => {
@@ -162,36 +154,36 @@ app.post('/webhook-clip', async (req, res) => {
                 </div>
             `;
 
-            const mailOptions = {
-                from: '"Tienda Krüger" <krugerdistribudorautorizado@gmail.com>',
-                to: email,
-                subject: 'Detalles de tu orden Krüger - ¡Pago Aprobado!',
-                html: `
-                    <div style="font-family: Arial, sans-serif; padding: 30px; max-width: 600px; margin: auto; border: 1px solid #e5e7eb; border-top: 6px solid #ff5a00; border-radius: 12px; background-color: #ffffff;">
-                        <div style="text-align: center; margin-bottom: 25px;">
-                            <h2 style="color: #002855; margin-bottom: 5px;">¡Gracias por tu compra, ${orden.customerName ? orden.customerName.split(' ')[0] : ''}!</h2>
-                            <p style="color: #22c55e; font-weight: bold; font-size: 16px; margin-top: 0; padding: 8px; background-color: #dcfce7; border-radius: 6px; display: inline-block;">Tu pago por $${amount} MXN fue aprobado.</p>
+            try {
+                await resend.emails.send({
+                    from: 'Tienda Krüger <onboarding@resend.dev>', // O tu dominio verificado si lo configuras después
+                    to: [email],
+                    subject: 'Detalles de tu orden Krüger - ¡Pago Aprobado!',
+                    html: `
+                        <div style="font-family: Arial, sans-serif; padding: 30px; max-width: 600px; margin: auto; border: 1px solid #e5e7eb; border-top: 6px solid #ff5a00; border-radius: 12px; background-color: #ffffff;">
+                            <div style="text-align: center; margin-bottom: 25px;">
+                                <h2 style="color: #002855; margin-bottom: 5px;">¡Gracias por tu compra, ${orden.customerName ? orden.customerName.split(' ')[0] : ''}!</h2>
+                                <p style="color: #22c55e; font-weight: bold; font-size: 16px; margin-top: 0; padding: 8px; background-color: #dcfce7; border-radius: 6px; display: inline-block;">Tu pago por $${amount} MXN fue aprobado.</p>
+                            </div>
+                            <h3 style="color: #002855; margin-bottom: 10px;">Resumen de tu pedido</h3>
+                            ${productosHTML}
+                            ${detallesEnvio}
+                            <p style="margin-top: 25px; font-size: 15px; color: #4b5563; line-height: 1.5;">Tu orden ya está confirmada. Nos pondremos en contacto contigo a la brevedad para coordinar la entrega en tu domicilio.</p>
+                            <hr style="border: 0; border-top: 1px solid #e5e7eb; margin: 30px 0 20px;">
+                            <p style="font-size: 11px; color: #9ca3af; text-align: center; text-transform: uppercase; letter-spacing: 1px;">Krüger - Distribuidor Autorizado<br>Este es un comprobante automático, por favor no respondas a este correo.</p>
                         </div>
-                        <h3 style="color: #002855; margin-bottom: 10px;">Resumen de tu pedido</h3>
-                        ${productosHTML}
-                        ${detallesEnvio}
-                        <p style="margin-top: 25px; font-size: 15px; color: #4b5563; line-height: 1.5;">Tu orden ya está confirmada. Nos pondremos en contacto contigo a la brevedad para coordinar la entrega en tu domicilio.</p>
-                        <hr style="border: 0; border-top: 1px solid #e5e7eb; margin: 30px 0 20px;">
-                        <p style="font-size: 11px; color: #9ca3af; text-align: center; text-transform: uppercase; letter-spacing: 1px;">Krüger - Distribuidor Autorizado<br>Este es un comprobante automático, por favor no respondas a este correo.</p>
-                    </div>
-                `
-            };
-
-            transporter.sendMail(mailOptions, (error, info) => {
-                if (error) console.error("❌ Error enviando correo:", error);
-                else console.log("✅ Correo enviado con éxito al cliente:", email);
-            });
+                    `
+                });
+                console.log("✅ Correo enviado con éxito mediante API al cliente:", email);
+            } catch (emailError) {
+                console.error("❌ Error enviando correo vía Resend:", emailError);
+            }
 
         } else {
-            console.log("ℹ️ El aviso de Clip no corresponde a una venta aprobada. Estados -> status:", status, "desc:", statusDesc);
+            console.log("ℹ️ El aviso de Clip no corresponde a una venta aprobada.");
         }
     } catch (err) {
-         console.error("❌ Error procesando la notificación de Clip:", err);
+         console.error("❌ Error procesando el webhook:", err);
     }
 });
 
