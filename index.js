@@ -81,29 +81,45 @@ app.post('/webhook-clip', async (req, res) => {
     const notificacion = req.body;
     console.log("¡Aviso de Clip recibido!");
     
-    // RADIOGRAFÍA
+    // Radiografía para control interno
     console.log("DATOS DEL WEBHOOK:", JSON.stringify(notificacion, null, 2));
 
-    // Siempre responder 200 OK a Clip para que no bloquee los avisos
+    // Siempre responder 200 OK a Clip de inmediato
     res.status(200).send('OK');
 
     try {
-        // Buscamos el estado en los diferentes formatos que suele usar Clip
-        const status = notificacion.status || (notificacion.payment && notificacion.payment.status) || "";
-        const amount = notificacion.amount || (notificacion.payment && notificacion.payment.amount) || 0;
-        const email = notificacion.payer_email || (notificacion.payment && notificacion.payment.payer_email) || "cliente@kruger.com";
-        const receipt = notificacion.receipt_no || (notificacion.payment && notificacion.payment.receipt_no) || "Sin folio";
-        
-        let meta = notificacion.metadata || (notificacion.payment && notificacion.payment.metadata) || {};
+        const status = (notificacion.status || "").toUpperCase();
+        const statusDesc = (notificacion.status_description || "").toUpperCase();
+        const paymentObj = notificacion.payment || {};
+        const pStatus = (paymentObj.status || "").toUpperCase();
+        const pStatusDesc = (paymentObj.status_description || "").toUpperCase();
 
-        // ¡AQUÍ ESTÁ LA MAGIA! Agregamos 'PAID' a la lista de aprobados
-        if (status === 'APPROVED' || status === 'PAYMENT.APPROVED' || status === 'PAID') {
+        const amount = notificacion.amount || paymentObj.amount || 0;
+        const email = notificacion.payer_email || paymentObj.payer_email || "cliente@kruger.com";
+        const receipt = notificacion.receipt_no || paymentObj.receipt_no || "Sin folio";
+        let meta = notificacion.metadata || paymentObj.metadata || {};
+
+        // 1. Detectamos explícitamente si el pago fue rechazado o cancelado para ignorarlo
+        const esRechazado = status.includes('DECLIN') || status.includes('REJECT') || status.includes('FAIL') || status.includes('CANC') ||
+                            statusDesc.includes('DECLIN') || statusDesc.includes('REJECT') || statusDesc.includes('FAIL') || statusDesc.includes('CANC') ||
+                            pStatus.includes('DECLIN') || pStatus.includes('REJECT') || pStatus.includes('FAIL') || pStatus.includes('CANC');
+
+        if (esRechazado) {
+            console.log("⚠️ El pago fue rechazado, cancelado o falló por parte del banco. No se registrará en Firebase.");
+            return; // Detenemos el proceso aquí mismo
+        }
+
+        // 2. Verificamos que realmente sea un pago exitoso
+        const esAprobado = status.includes('APPROV') || status.includes('PAID') || statusDesc.includes('COMPLET') ||
+                           pStatus.includes('APPROV') || pStatus.includes('PAID') || pStatusDesc.includes('COMPLET');
+
+        if (esAprobado) {
             let orden = {};
             if (meta.orden_json) {
                 orden = JSON.parse(meta.orden_json);
             }
 
-            // 1. GUARDAR EN FIREBASE
+            // GUARDAR EN FIREBASE SOLO SI ESTÁ APROBADO
             try {
                 orden.status = "Pagado y Confirmado (Clip)";
                 orden.fechaPago = new Date().toISOString();
@@ -115,7 +131,7 @@ app.post('/webhook-clip', async (req, res) => {
                 console.error("❌ Error al guardar en Firebase:", fbError);
             }
 
-            // 2. ENVIAR CORREO
+            // ENVIAR CORREO DE CONFIRMACIÓN
             let productosHTML = "";
             if (orden.items && orden.items.length > 0) {
                 orden.items.forEach(item => {
@@ -172,7 +188,7 @@ app.post('/webhook-clip', async (req, res) => {
             });
 
         } else {
-            console.log("El estado del pago no es APPROVED o no se reconoció el formato. Estado detectado:", status);
+            console.log("ℹ️ El aviso de Clip no corresponde a una venta aprobada. Estados -> status:", status, "desc:", statusDesc);
         }
     } catch (err) {
          console.error("❌ Error procesando la notificación de Clip:", err);
