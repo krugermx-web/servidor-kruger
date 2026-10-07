@@ -27,7 +27,7 @@ app.post("/crear-pago-clip", async (req, res) => {
         const { items, total, ordenKruger } = req.body;
 
         // Petición oficial a la API de Clip Checkout
-        const response = await fetch('https://api-v2.clip.mx/checkout', {
+        const response = await fetch('https://api.payclip.com/v2/checkout', {
             method: 'POST',
             headers: {
                 'accept': 'application/vnd.clip.v2+json',
