@@ -1,7 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
-const { Resend } = require("resend"); // NUEVO: API de correos moderna
+const { Resend } = require("resend");
 const { initializeApp } = require("firebase/app");
 const { getFirestore, collection, addDoc } = require("firebase/firestore");
 
@@ -16,8 +16,6 @@ const firebaseConfig = {
 const appFirebase = initializeApp(firebaseConfig);
 const db = getFirestore(appFirebase);
 
-// Inicializamos Resend con tu variable de entorno en Render
-// (Debes crear la variable RESEND_API_KEY en tu panel de Render)
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 const app = express();
@@ -50,7 +48,7 @@ app.post("/crear-pago-clip", async (req, res) => {
                     error: "https://krugermx-web.github.io/KrugerDistribuidora/index.html",
                     default: "https://krugermx-web.github.io/KrugerDistribuidora/success.html"
                 },
-                payer_email: ordenKruger?.customerEmail || "cliente@kruger.com",
+                payer_email: ordenKruger?.customerEmail || "krugerdistribudorautorizado@gmail.com",
                 metadata: {
                     orden_json: JSON.stringify(ordenKruger || {})
                 }
@@ -87,11 +85,24 @@ app.post('/webhook-clip', async (req, res) => {
         const pStatusDesc = (paymentObj.status_description || "").toUpperCase();
 
         const amount = notificacion.amount || paymentObj.amount || 0;
-        const email = notificacion.payer_email || paymentObj.payer_email || "cliente@kruger.com";
         const receipt = notificacion.receipt_no || paymentObj.receipt_no || "Sin folio";
+        
         let meta = notificacion.metadata || paymentObj.metadata || {};
+        
+        // RECUPERAMOS LOS DATOS DE LA ORDEN DEL CLIENTE DESDE LOS METADATOS
+        let orden = {};
+        if (meta.orden_json) {
+            try {
+                orden = JSON.parse(meta.orden_json);
+            } catch (e) {
+                console.error("Error al parsear orden_json:", e);
+            }
+        }
 
-        // Filtro estricto: Si viene rechazado, cancelado o declinado, lo ignoramos por completo
+        // CAPTURAMOS EL CORREO REAL DEL CLIENTE (Priorizando el formulario, luego Clip)
+        const emailCliente = orden.customerEmail || notificacion.payer_email || paymentObj.payer_email || "";
+
+        // Filtro estricto de pagos rechazados/cancelados
         const esRechazado = status.includes('DECLIN') || status.includes('REJECT') || status.includes('FAIL') || status.includes('CANC') ||
                             statusDesc.includes('DECLIN') || statusDesc.includes('REJECT') || statusDesc.includes('FAIL') || statusDesc.includes('CANC') ||
                             pStatus.includes('DECLIN') || pStatus.includes('REJECT') || pStatus.includes('FAIL') || pStatus.includes('CANC');
@@ -101,29 +112,23 @@ app.post('/webhook-clip', async (req, res) => {
             return;
         }
 
-        // Verificamos si el pago fue exitoso
         const esAprobado = status.includes('APPROV') || status.includes('PAID') || statusDesc.includes('COMPLET') ||
                            pStatus.includes('APPROV') || pStatus.includes('PAID') || pStatusDesc.includes('COMPLET');
 
         if (esAprobado) {
-            let orden = {};
-            if (meta.orden_json) {
-                orden = JSON.parse(meta.orden_json);
-            }
-
-            // 1. GUARDAR EN FIREBASE
+            // 1. GUARDAR EN FIREBASE CON LOS DATOS REALES DEL CLIENTE
             try {
                 orden.status = "Pagado y Confirmado (Clip)";
                 orden.fechaPago = new Date().toISOString();
                 orden.transaccionId = receipt;
                 
                 await addDoc(collection(db, "orders"), orden);
-                console.log("✅ ORDEN GUARDADA EXITOSAMENTE EN FIREBASE DESDE EL SERVIDOR");
+                console.log("✅ ORDEN DEL CLIENTE GUARDADA EN FIREBASE:", orden.customerName);
             } catch (fbError) {
                 console.error("❌ Error al guardar en Firebase:", fbError);
             }
 
-            // 2. ENVIAR CORREO VÍA API (Resend)
+            // 2. ENVIAR CORREO AL CORREO REAL DEL CLIENTE
             let productosHTML = "";
             if (orden.items && orden.items.length > 0) {
                 orden.items.forEach(item => {
@@ -154,29 +159,33 @@ app.post('/webhook-clip', async (req, res) => {
                 </div>
             `;
 
-            try {
-                await resend.emails.send({
-                    from: 'Tienda Krüger <onboarding@resend.dev>', // O tu dominio verificado si lo configuras después
-                    to: [email],
-                    subject: 'Detalles de tu orden Krüger - ¡Pago Aprobado!',
-                    html: `
-                        <div style="font-family: Arial, sans-serif; padding: 30px; max-width: 600px; margin: auto; border: 1px solid #e5e7eb; border-top: 6px solid #ff5a00; border-radius: 12px; background-color: #ffffff;">
-                            <div style="text-align: center; margin-bottom: 25px;">
-                                <h2 style="color: #002855; margin-bottom: 5px;">¡Gracias por tu compra, ${orden.customerName ? orden.customerName.split(' ')[0] : ''}!</h2>
-                                <p style="color: #22c55e; font-weight: bold; font-size: 16px; margin-top: 0; padding: 8px; background-color: #dcfce7; border-radius: 6px; display: inline-block;">Tu pago por $${amount} MXN fue aprobado.</p>
+            if (emailCliente) {
+                try {
+                    await resend.emails.send({
+                        from: 'Tienda Krüger <onboarding@resend.dev>',
+                        to: [emailCliente],
+                        subject: 'Detalles de tu orden Krüger - ¡Pago Aprobado!',
+                        html: `
+                            <div style="font-family: Arial, sans-serif; padding: 30px; max-width: 600px; margin: auto; border: 1px solid #e5e7eb; border-top: 6px solid #ff5a00; border-radius: 12px; background-color: #ffffff;">
+                                <div style="text-align: center; margin-bottom: 25px;">
+                                    <h2 style="color: #002855; margin-bottom: 5px;">¡Gracias por tu compra, ${orden.customerName ? orden.customerName.split(' ')[0] : 'Cliente'}!</h2>
+                                    <p style="color: #22c55e; font-weight: bold; font-size: 16px; margin-top: 0; padding: 8px; background-color: #dcfce7; border-radius: 6px; display: inline-block;">Tu pago por $${amount} MXN fue aprobado.</p>
+                                </div>
+                                <h3 style="color: #002855; margin-bottom: 10px;">Resumen de tu pedido</h3>
+                                ${productosHTML}
+                                ${detallesEnvio}
+                                <p style="margin-top: 25px; font-size: 15px; color: #4b5563; line-height: 1.5;">Tu orden ya está confirmada. Nos pondremos en contacto contigo a la brevedad para coordinar la entrega en tu domicilio.</p>
+                                <hr style="border: 0; border-top: 1px solid #e5e7eb; margin: 30px 0 20px;">
+                                <p style="font-size: 11px; color: #9ca3af; text-align: center; text-transform: uppercase; letter-spacing: 1px;">Krüger - Distribuidor Autorizado<br>Este es un comprobante automático, por favor no respondas a este correo.</p>
                             </div>
-                            <h3 style="color: #002855; margin-bottom: 10px;">Resumen de tu pedido</h3>
-                            ${productosHTML}
-                            ${detallesEnvio}
-                            <p style="margin-top: 25px; font-size: 15px; color: #4b5563; line-height: 1.5;">Tu orden ya está confirmada. Nos pondremos en contacto contigo a la brevedad para coordinar la entrega en tu domicilio.</p>
-                            <hr style="border: 0; border-top: 1px solid #e5e7eb; margin: 30px 0 20px;">
-                            <p style="font-size: 11px; color: #9ca3af; text-align: center; text-transform: uppercase; letter-spacing: 1px;">Krüger - Distribuidor Autorizado<br>Este es un comprobante automático, por favor no respondas a este correo.</p>
-                        </div>
-                    `
-                });
-                console.log("✅ Correo enviado con éxito mediante API al cliente:", email);
-            } catch (emailError) {
-                console.error("❌ Error enviando correo vía Resend:", emailError);
+                        `
+                    });
+                    console.log("✅ Correo enviado exitosamente al correo del cliente:", emailCliente);
+                } catch (emailError) {
+                    console.error("❌ Error enviando correo vía Resend:", emailError);
+                }
+            } else {
+                console.log("⚠️ No se encontró un correo válido para enviar la confirmación.");
             }
 
         } else {
