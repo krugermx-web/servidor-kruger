@@ -17,7 +17,7 @@ app.use(cors({ origin: true }));
 app.use(express.json());
 
 // Jalamos tu llave secreta de Clip (que dejaste en la variable de Mercado Libre)
-const CLIP_SECRET_KEY = process.env['Mercado Libre Pago Token'];
+const CLIP_SECRET_KEY = process.env['MERCADO_PAGO_TOKEN'];
 
 // =================================================================
 // RUTA 1: CREAR EL LINK DE PAGO CLIP (La que llama tu index.html)
@@ -40,7 +40,7 @@ app.post("/crear-pago-clip", async (req, res) => {
                 purchase_description: 'Compra en Krüger',
                 redirection_url: {
                     // Cambia esto a la URL de tu página de agradecimiento
-                    default: "https://krugermx-web.github.io/KrugerDistribuidora/exito.html" 
+                    default: "https://krugermx-web.github.io/KrugerDistribuidora/success.html" 
                 },
                 // Podemos mandar el correo del cliente a Clip para que le mande su recibo oficial
                 payer_email: ordenKruger?.payer?.email || "cliente@kruger.com",
