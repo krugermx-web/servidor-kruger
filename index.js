@@ -81,7 +81,7 @@ app.post('/webhook-clip', async (req, res) => {
     const notificacion = req.body;
     console.log("¡Aviso de Clip recibido!");
     
-    // RADIOGRAFÍA: Imprimimos todo lo que manda Clip para saber exactamente su estructura
+    // RADIOGRAFÍA
     console.log("DATOS DEL WEBHOOK:", JSON.stringify(notificacion, null, 2));
 
     // Siempre responder 200 OK a Clip para que no bloquee los avisos
@@ -96,7 +96,8 @@ app.post('/webhook-clip', async (req, res) => {
         
         let meta = notificacion.metadata || (notificacion.payment && notificacion.payment.metadata) || {};
 
-        if (status === 'APPROVED' || status === 'PAYMENT.APPROVED') {
+        // ¡AQUÍ ESTÁ LA MAGIA! Agregamos 'PAID' a la lista de aprobados
+        if (status === 'APPROVED' || status === 'PAYMENT.APPROVED' || status === 'PAID') {
             let orden = {};
             if (meta.orden_json) {
                 orden = JSON.parse(meta.orden_json);
