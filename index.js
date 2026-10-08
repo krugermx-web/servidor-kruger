@@ -3,7 +3,7 @@ const cors = require("cors");
 const fetch = require("node-fetch");
 const { Resend } = require("resend");
 const { initializeApp } = require("firebase/app");
-// IMPORTAMOS getDocs, query y where PARA BUSCAR LA ORDEN
+// Se importa getDocs, query y where para buscar órdenes
 const { getFirestore, collection, doc, updateDoc, getDoc, getDocs, query, where } = require("firebase/firestore");
 
 const firebaseConfig = {
@@ -84,19 +84,15 @@ app.post('/webhook-clip', async (req, res) => {
         
         const paymentObj = notificacion.payment || notificacion.payment_detail || {};
         const pStatus = (paymentObj.status || "").toUpperCase();
-        const pStatusDesc = (paymentObj.status_description || "").toUpperCase();
 
         const amount = notificacion.amount || paymentObj.amount || 0;
         const receipt = notificacion.receipt_no || paymentObj.receipt_no || "Sin folio";
         
-        // 1. Buscamos el ID en los metadatos (por si Clip decide enviarlo bien)
+        // 1. Buscamos el ID en los metadatos (por si Clip decide enviarlo alguna vez)
         let meta = notificacion.metadata || paymentObj.metadata || (notificacion.payment_request_detail && notificacion.payment_request_detail.metadata) || {};
         let orderId = meta.orderId || "";
 
-        // 2. Rescatamos el correo desde donde sea que Clip lo haya escondido
-        const clipEmail = notificacion.user_id || notificacion.payer_email || (notificacion.payment_request_detail && notificacion.payment_request_detail.assigned_user) || "";
-
-        console.log(`🔎 Status: ${status} | Event: ${eventType} | OrderID: ${orderId} | Correo: ${clipEmail}`);
+        console.log(`🔎 Status: ${status} | Event: ${eventType} | OrderID Original: ${orderId}`);
 
         const esRechazado = status.includes('DECLIN') || status.includes('REJECT') || status.includes('FAIL') || status.includes('CANC') ||
                             pStatus.includes('DECLIN') || pStatus.includes('REJECT') || pStatus.includes('FAIL');
@@ -106,47 +102,48 @@ app.post('/webhook-clip', async (req, res) => {
             return;
         }
 
-        // Clip nos envía "REQUEST_COMPLETED" o "PAID" cuando fue exitoso
+        // Criterios de pago exitoso de Clip
         const esAprobado = status.includes('APPROV') || status.includes('PAID') || eventType.includes('COMPLETED') || pStatus.includes('COMPLET') || pStatus.includes('PAID');
 
         if (esAprobado) {
             
-            // ¡MAGIA!: Si Clip borró el orderId, buscamos la orden usando el correo del cliente.
-            if (!orderId && clipEmail) {
-                console.log(`Buscando la orden en Firebase para el correo: ${clipEmail}`);
+            // ¡NUEVA MAGIA INFALIBLE!: Si Clip esconde el ID, tomamos la orden más reciente "Pendiente de Pago"
+            if (!orderId) {
+                console.log("Buscando la última orden pendiente de pago en Firebase...");
                 const q = query(
                     collection(db, "orders"), 
-                    where("customerEmail", "==", clipEmail),
                     where("status", "==", "Pendiente de Pago")
                 );
                 
                 const querySnapshot = await getDocs(q);
                 if (!querySnapshot.empty) {
-                    // Si el cliente intentó pagar varias veces, tomamos el intento más reciente
                     let docsList = [];
                     querySnapshot.forEach(d => docsList.push({ id: d.id, ...d.data() }));
+                    
+                    // Ordenamos para tomar siempre la más reciente (la que acaba de hacer este cliente)
                     docsList.sort((a, b) => b.createdAt.seconds - a.createdAt.seconds);
                     
-                    orderId = docsList[0].id; // Asignamos el ID rescatado
-                    console.log("✅ ¡Orden rescatada inteligentemente! ID:", orderId);
+                    orderId = docsList[0].id; 
+                    console.log("✅ ¡Orden pendiente rescatada con éxito! ID:", orderId);
                 }
             }
 
+            // AHORA SÍ, ACTUALIZAMOS LA ORDEN A "PAGADO" Y ENVIAMOS EL CORREO
             if (orderId) {
-                // AHORA SÍ: ACTUALIZAR LA ORDEN EXISTENTE EN FIREBASE A "Pagado"
                 const orderRef = doc(db, "orders", orderId);
                 const orderSnap = await getDoc(orderRef);
 
                 if (orderSnap.exists()) {
                     const ordenData = orderSnap.data();
                     
+                    // Actualizamos Firebase
                     await updateDoc(orderRef, {
                         status: "Pagado",
                         transaccionId: receipt
                     });
                     console.log("✅ ORDEN ACTUALIZADA A PAGADO EN EL ADMIN");
 
-                    // ENVIAR CORREO
+                    // Construimos los productos para el correo
                     let productosHTML = "";
                     if (ordenData.items && ordenData.items.length > 0) {
                         ordenData.items.forEach(item => {
@@ -171,8 +168,8 @@ app.post('/webhook-clip', async (req, res) => {
                             <p style="margin: 5px 0; font-size: 14px;"><strong>Dirección de Envío:</strong> ${ordenData.shippingAddress || 'No especificada'}</p>
                             ${ordenData.needsInstall ? `
                                 <h4 style="margin-top: 15px; color: #002855; border-bottom: 1px solid #ddd; padding-bottom: 8px;">Cita de Instalación</h4>
-                                <p style="margin: 5px 0; font-size: 14px;"><strong>Dirección a instalar:</strong> ${ordenData.installAddress || ordenData.shippingAddress}</p>
-                                <p style="margin: 5px 0; font-size: 14px;"><strong>Horario solicitado:</strong> ${ordenData.installSchedule || 'A coordinar'}</p>
+                                <p style="margin: 5px 0; font-size: 14px;"><strong>Dirección a instalar:</strong> \${ordenData.installAddress || ordenData.shippingAddress}</p>
+                                <p style="margin: 5px 0; font-size: 14px;"><strong>Horario solicitado:</strong> \${ordenData.installSchedule || 'A coordinar'}</p>
                             ` : ''}
                         </div>
                     `;
@@ -203,7 +200,7 @@ app.post('/webhook-clip', async (req, res) => {
                     }
                 }
             } else {
-                console.log("⚠️ Pago aprobado pero no se pudo asociar a ninguna orden pendiente.");
+                console.log("⚠️ Pago aprobado pero no hay ninguna orden pendiente en Firebase para asignarle.");
             }
         }
     } catch (err) {
