@@ -200,7 +200,8 @@ app.post('/webhook-clip', async (req, res) => {
                         <div style="max-width: 600px; margin: 20px auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.05);">
                             <!-- Header -->
                             <div style="background-color: #002855; padding: 30px 20px; text-align: center;">
-                                <img src="https://krugermx-web.github.io/KrugerDistribuidora/logo-kruger-blanco.png" alt="Krüger" style="height: 40px; margin-bottom: 15px;" onerror="this.style.display='none'">
+                                <!-- AQUÍ ESTÁ EL LOGO CORREGIDO A kruger.png -->
+                                <img src="https://krugermx-web.github.io/KrugerDistribuidora/kruger.png" alt="Krüger" style="height: 40px; margin-bottom: 15px;" onerror="this.style.display='none'">
                                 <h1 style="color: #ffffff; margin: 0; font-size: 22px; letter-spacing: 1px;">¡PAGO APROBADO!</h1>
                                 <p style="color: #a0aec0; margin: 10px 0 0 0; font-size: 14px;">Folio de transacción: ${receipt}</p>
                             </div>
