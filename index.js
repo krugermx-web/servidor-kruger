@@ -19,25 +19,21 @@ const appFirebase = initializeApp(firebaseConfig);
 const db = getFirestore(appFirebase);
 const auth = getAuth(appFirebase);
 
-// Variables de entorno para Firebase (Tu acceso al Admin)
-const adminEmail = process.env.ADMIN_EMAIL;
-const adminPassword = process.env.ADMIN_PASSWORD;
-
 // =================================================================
-// AUTENTICACIÓN EN FIREBASE
+// AUTENTICACIÓN EN FIREBASE (Para leer/escribir en la base de datos)
 // =================================================================
-signInWithEmailAndPassword(auth, adminEmail, adminPassword)
+signInWithEmailAndPassword(auth, process.env.ADMIN_EMAIL, process.env.ADMIN_PASSWORD)
     .then(() => console.log("✅ Servidor autenticado exitosamente en Firebase como Admin."))
     .catch((error) => console.error("❌ Error al iniciar sesión en el servidor:", error.message));
 
 // =================================================================
-// CONFIGURACIÓN DE NODEMAILER CON TU GMAIL REAL
+// CONFIGURACIÓN DE NODEMAILER (Leyendo directo de tus variables en Render)
 // =================================================================
 const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
-        user: 'krugerdistribudorautorizado@gmail.com', // Tu correo real de la tienda
-        pass: process.env.EMAIL_PASS // Tu contraseña de aplicación segura en Render
+        user: process.env.STORE_EMAIL, // Tu variable exacta de Render (krugerdistribudorautorizado@gmail.com)
+        pass: process.env.EMAIL_PASS   // Tu contraseña de aplicación de 16 letras
     }
 });
 
@@ -71,7 +67,7 @@ app.post("/crear-pago-clip", async (req, res) => {
                     error: "https://krugermx-web.github.io/KrugerDistribuidora/index.html",
                     default: "https://krugermx-web.github.io/KrugerDistribuidora/success.html"
                 },
-                payer_email: ordenKruger?.customerEmail || "krugerdistribudorautorizado@gmail.com",
+                payer_email: ordenKruger?.customerEmail || process.env.STORE_EMAIL,
                 metadata: { orderId: ordenKruger?.orderId || "" }
             })
         });
@@ -114,7 +110,7 @@ app.post('/webhook-clip', async (req, res) => {
 
         if (esAprobado) {
             
-            // BÚSQUEDA: Si Clip esconde el ID, tomamos la última orden pendiente de pago
+            // BÚSQUEDA DE EMERGENCIA SI CLIP ESCONDE EL ID
             if (!orderId) {
                 console.log("Buscando la última orden pendiente de pago en Firebase...");
                 const q = query(collection(db, "orders"), where("status", "==", "Pendiente de Pago"));
@@ -143,6 +139,14 @@ app.post('/webhook-clip', async (req, res) => {
 
                 if (orderSnap.exists()) {
                     const ordenData = orderSnap.data();
+
+                    // ==========================================
+                    // ESCUDO ANTI-DUPLICADOS (Bloquea avisos dobles de Clip)
+                    // ==========================================
+                    if (ordenData.status === "Pagado") {
+                        console.log("⚠️ Esta orden ya fue procesada (aviso duplicado de Clip). Omitiendo...");
+                        return;
+                    }
                     
                     try {
                         await updateDoc(orderRef, {
@@ -155,7 +159,7 @@ app.post('/webhook-clip', async (req, res) => {
                     }
 
                     // ==========================================
-                    // PLANTILLA DE CORREO (FORMATO PREMIUM)
+                    // PLANTILLA DE CORREO PREMIUM
                     // ==========================================
                     let productosHTML = "";
                     if (ordenData.items && ordenData.items.length > 0) {
@@ -198,40 +202,29 @@ app.post('/webhook-clip', async (req, res) => {
                     <html>
                     <body style="margin: 0; padding: 0; background-color: #f8f9fa; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;">
                         <div style="max-width: 600px; margin: 20px auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.05);">
-                            <!-- Header -->
                             <div style="background-color: #002855; padding: 30px 20px; text-align: center;">
-                                <!-- AQUÍ ESTÁ EL LOGO CORREGIDO A kruger.png -->
                                 <img src="https://krugermx-web.github.io/KrugerDistribuidora/kruger.png" alt="Krüger" style="height: 40px; margin-bottom: 15px;" onerror="this.style.display='none'">
                                 <h1 style="color: #ffffff; margin: 0; font-size: 22px; letter-spacing: 1px;">¡PAGO APROBADO!</h1>
                                 <p style="color: #a0aec0; margin: 10px 0 0 0; font-size: 14px;">Folio de transacción: ${receipt}</p>
                             </div>
-                            
-                            <!-- Body -->
                             <div style="padding: 30px 40px;">
                                 <h2 style="color: #333; font-size: 20px; margin-top: 0;">Hola, ${ordenData.customerName || 'Cliente'}</h2>
                                 <p style="color: #666; font-size: 16px; line-height: 1.5;">Hemos recibido tu pago con éxito. Tu pedido ya está en nuestro sistema y comenzaremos a procesarlo de inmediato.</p>
-                                
                                 <h3 style="color: #002855; border-bottom: 2px solid #002855; padding-bottom: 8px; margin-top: 30px; font-size: 16px; text-transform: uppercase;">Resumen de tu Compra</h3>
                                 ${productosHTML}
-                                
                                 <div style="text-align: right; margin-top: 20px;">
                                     <span style="font-size: 14px; color: #666;">Total pagado:</span><br>
                                     <strong style="color: #D31145; font-size: 28px;">$${Number(amount).toLocaleString('es-MX')} <span style="font-size: 16px; color: #888;">MXN</span></strong>
                                 </div>
-
                                 <h3 style="color: #002855; border-bottom: 2px solid #002855; padding-bottom: 8px; margin-top: 30px; font-size: 16px; text-transform: uppercase;">Detalles de Entrega</h3>
                                 <p style="margin: 5px 0; font-size: 14px; color: #444;"><strong>Dirección de envío:</strong><br>${ordenData.shippingAddress || 'No especificada'}</p>
                                 <p style="margin: 10px 0 5px 0; font-size: 14px; color: #444;"><strong>Teléfono de contacto:</strong><br>${ordenData.customerPhone || 'No especificado'}</p>
-                                
                                 ${instalacionHTML}
-                                
                                 <p style="color: #666; font-size: 14px; line-height: 1.5; margin-top: 30px; background-color: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center;">
                                     Nos pondremos en contacto contigo a la brevedad para coordinar la entrega.<br>
-                                    ¿Tienes dudas? Escríbenos a <strong>krugerdistribudorautorizado@gmail.com</strong>
+                                    ¿Tienes dudas? Escríbenos a nuestro contacto oficial.
                                 </p>
                             </div>
-                            
-                            <!-- Footer -->
                             <div style="background-color: #e2e8f0; padding: 20px; text-align: center;">
                                 <p style="color: #64748b; font-size: 12px; margin: 0;">© 2026 Krüger Distribuidor Autorizado.<br>Todos los derechos reservados. León, Guanajuato, México.</p>
                             </div>
@@ -241,13 +234,13 @@ app.post('/webhook-clip', async (req, res) => {
                     `;
 
                     // ==========================================
-                    // ENVÍO DE CORREO USANDO NODEMAILER
+                    // ENVÍO DE CORREO
                     // ==========================================
                     if (ordenData.customerEmail) {
                         try {
                             const info = await transporter.sendMail({
-                                from: '"Tienda Krüger" <krugerdistribudorautorizado@gmail.com>', // Sale desde tu Gmail
-                                to: ordenData.customerEmail, // Llega al correo de tu cliente real
+                                from: `"Tienda Krüger" <${process.env.STORE_EMAIL}>`, // Usa directamente la variable
+                                to: ordenData.customerEmail, 
                                 subject: '💳 ¡Tu recibo de Krüger está listo! - Pago Aprobado',
                                 html: emailTemplate
                             });
